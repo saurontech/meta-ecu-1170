@@ -1,0 +1,113 @@
+From c36a09929787221a213302842258af85406d6dd5 Mon Sep 17 00:00:00 2001
+From: OpenEmbedded <oe.patch@oe>
+Date: Fri, 28 Aug 2026 19:50:39 +0800
+Subject: [PATCH] net: support ecu1170 ethernet configuration
+
+---
+ drivers/net/ethernet/realtek/r8168/r8168_n.c  |  1 +
+ .../net/ethernet/stmicro/stmmac/stmmac_main.c |  7 +++-
+ drivers/net/phy/motorcomm.c                   | 34 +++++++++++++++++++
+ 3 files changed, 41 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/net/ethernet/realtek/r8168/r8168_n.c b/drivers/net/ethernet/realtek/r8168/r8168_n.c
+index 7e9e2eac948c..c4a11371d830 100644
+--- a/drivers/net/ethernet/realtek/r8168/r8168_n.c
++++ b/drivers/net/ethernet/realtek/r8168/r8168_n.c
+@@ -26512,6 +26512,7 @@ rtl8168_init_board(struct pci_dev *pdev,
+ 
+         SET_MODULE_OWNER(dev);
+         SET_NETDEV_DEV(dev, &pdev->dev);
++        strlcpy(dev->name, "peth%d", IFNAMSIZ);
+         tp = netdev_priv(dev);
+         tp->dev = dev;
+         tp->pci_dev = pdev;
+diff --git a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+index 0471196924f0..f496f1a638a0 100644
+--- a/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
++++ b/drivers/net/ethernet/stmicro/stmmac/stmmac_main.c
+@@ -31,6 +31,7 @@
+ #include <linux/pm_runtime.h>
+ #include <linux/prefetch.h>
+ #include <linux/pinctrl/consumer.h>
++#include <linux/of.h>
+ #ifdef CONFIG_DEBUG_FS
+ #include <linux/debugfs.h>
+ #include <linux/seq_file.h>
+@@ -7110,13 +7111,17 @@ int stmmac_dvr_probe(struct device *device,
+ 	struct net_device *ndev = NULL;
+ 	struct stmmac_priv *priv;
+ 	u32 rxq;
+-	int i, ret = 0;
++	int alias_id, i, ret = 0;
+ 
+ 	ndev = devm_alloc_etherdev_mqs(device, sizeof(struct stmmac_priv),
+ 				       MTL_MAX_TX_QUEUES, MTL_MAX_RX_QUEUES);
+ 	if (!ndev)
+ 		return -ENOMEM;
+ 
++	alias_id = device->of_node ? of_alias_get_id(device->of_node, "ethernet") : -ENODEV;
++	if (alias_id >= 0)
++		snprintf(ndev->name, IFNAMSIZ, "eth%d", alias_id);
++
+ 	SET_NETDEV_DEV(ndev, device);
+ 
+ 	priv = netdev_priv(ndev);
+diff --git a/drivers/net/phy/motorcomm.c b/drivers/net/phy/motorcomm.c
+index a618df511257..91cba5da9e40 100644
+--- a/drivers/net/phy/motorcomm.c
++++ b/drivers/net/phy/motorcomm.c
+@@ -8,6 +8,7 @@
+ #include <linux/kernel.h>
+ #include <linux/module.h>
+ #include <linux/netdevice.h>
++#include <linux/of.h>
+ #include <linux/of_device.h>
+ #include <linux/phy.h>
+ 
+@@ -247,6 +248,33 @@ static int ytphy_write_ext(struct phy_device *phydev, u32 regnum, u16 val)
+ 	return ret;
+ }
+ 
++static bool ytphy_is_ecu1170(void)
++{
++	return of_machine_is_compatible("rockchip,rk3568-ecu1170");
++}
++
++static int yt8521_ecu1170_led_init(struct phy_device *phydev)
++{
++	static const int led_cfg_val[3] = {0x1e00, 0x20, 0x40};
++	int i, ret;
++
++	for (i = 0; i < ARRAY_SIZE(led_cfg_val); i++) {
++		ret = ytphy_write_ext(phydev, 0xa000, 0);
++		if (ret < 0)
++			return ret;
++
++		ret = ytphy_write_ext(phydev, 0xa00c + i, led_cfg_val[i]);
++		if (ret < 0)
++			return ret;
++	}
++
++	ret = ytphy_write_ext(phydev, 0xa000, 0);
++	if (ret < 0)
++		return ret;
++
++	return ytphy_write_ext(phydev, 0x57, 0x264c);
++}
++
+ static int __maybe_unused ytphy_write_mmd(struct phy_device *phydev, u16 device, u16 reg, u16 value)
+ {
+ 	int ret = 0;
+@@ -709,6 +737,12 @@ static int yt8521_config_init(struct phy_device *phydev)
+ 	if (ret < 0)
+ 		return ret;
+ 
++	if (ytphy_is_ecu1170()) {
++		ret = yt8521_ecu1170_led_init(phydev);
++		if (ret < 0)
++			return ret;
++	}
++
+ 	netdev_info(phydev->attached_dev, "%s done, phy addr: %d, strap mode = %d, polling mode = %d\n",
+ 		    __func__, phydev->mdio.addr, hw_strap_mode, yt8521_hw_strap_polling(phydev));
+ 

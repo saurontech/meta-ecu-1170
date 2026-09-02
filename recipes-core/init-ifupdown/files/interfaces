@@ -1,0 +1,15 @@
+# /etc/network/interfaces -- configuration file for ifup(8), ifdown(8)
+
+auto lo
+iface lo inet loopback
+
+# eth0..eth3 are managed by connman (auto DHCP + hotplug support).
+# Do NOT add them here, otherwise ifupdown and connman would both try to
+# manage the same interfaces.
+
+# USB gadget static IP (managed by ifupdown; usb0 is blacklisted in connman)
+iface usb0 inet static
+	address 192.168.7.2
+	netmask 255.255.255.0
+	network 192.168.7.0
+	gateway 192.168.7.1
