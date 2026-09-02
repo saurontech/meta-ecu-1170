@@ -1,0 +1,11 @@
+# Fix the PCIe-attached gigabit ethernet port ordering on ECU1170.
+#
+# The two onboard PCIe r8168 NICs are enumerated by the kernel in a
+# non-deterministic order. The r8168 driver registers them as peth%d first,
+# so these udev renames do not conflict with eth2/eth3 being temporarily
+# occupied by the opposite port.
+#
+#   PCI 0002:21:00.0 -> eth2
+#   PCI 0001:11:00.0 -> eth3
+SUBSYSTEM=="net", ACTION=="add", KERNEL=="peth*", KERNELS=="0002:21:00.0", NAME="eth2"
+SUBSYSTEM=="net", ACTION=="add", KERNEL=="peth*", KERNELS=="0001:11:00.0", NAME="eth3"

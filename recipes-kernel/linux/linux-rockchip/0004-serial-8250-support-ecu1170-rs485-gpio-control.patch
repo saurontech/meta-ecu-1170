@@ -1,0 +1,150 @@
+From 48acf8e161f3a427a5de110e12f31753d1d13001 Mon Sep 17 00:00:00 2001
+From: OpenEmbedded <oe.patch@oe>
+Date: Fri, 28 Aug 2026 19:51:15 +0800
+Subject: [PATCH] serial: 8250: support ecu1170 rs485 gpio control
+
+---
+ drivers/tty/serial/8250/8250_dwlib.c |  4 ++-
+ drivers/tty/serial/8250/8250_port.c  | 49 ++++++++++++++++++++++++----
+ drivers/tty/serial/serial_core.c     |  8 +++++
+ include/linux/serial_core.h          |  1 +
+ 4 files changed, 54 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/tty/serial/8250/8250_dwlib.c b/drivers/tty/serial/8250/8250_dwlib.c
+index f1c4c64fa4bc..69d7a2f0f9e5 100644
+--- a/drivers/tty/serial/8250/8250_dwlib.c
++++ b/drivers/tty/serial/8250/8250_dwlib.c
+@@ -286,7 +286,9 @@ void dw8250_setup_port(struct uart_port *p)
+ 	struct uart_8250_port *up = up_to_u8250p(p);
+ 	u32 reg, old_dlf;
+ 
+-	pd->hw_rs485_support = dw8250_detect_rs485_hw(p);
++	pd->hw_rs485_support = !device_property_present(p->dev, "rts-gpios") &&
++				       !device_property_present(p->dev, "rs485-de-gpios") &&
++				       dw8250_detect_rs485_hw(p);
+ 	if (pd->hw_rs485_support) {
+ 		p->rs485_config = dw8250_rs485_config;
+ 		up->lsr_save_mask = LSR_SAVE_FLAGS | DW_UART_LSR_ADDR_RCVD;
+diff --git a/drivers/tty/serial/8250/8250_port.c b/drivers/tty/serial/8250/8250_port.c
+index e82660994fba..22e317d4a5fa 100644
+--- a/drivers/tty/serial/8250/8250_port.c
++++ b/drivers/tty/serial/8250/8250_port.c
+@@ -1450,12 +1450,23 @@ static void serial8250_stop_rx(struct uart_port *port)
+ void serial8250_em485_stop_tx(struct uart_8250_port *p)
+ {
+ 	unsigned char mcr = serial8250_in_MCR(p);
+-
+-	if (p->port.rs485.flags & SER_RS485_RTS_AFTER_SEND)
+-		mcr |= UART_MCR_RTS;
+-	else
+-		mcr &= ~UART_MCR_RTS;
+-	serial8250_out_MCR(p, mcr);
++	unsigned int mctrl;
++	int value;
++
++	if (mctrl_gpio_to_gpiod(p->gpios, UART_GPIO_RTS)) {
++		mctrl = (p->port.rs485.flags & SER_RS485_RTS_AFTER_SEND) ?
++			 TIOCM_RTS : 0;
++		mctrl_gpio_set(p->gpios, mctrl);
++	} else if (p->port.rs485_de_gpio) {
++		value = (p->port.rs485.flags & SER_RS485_RTS_AFTER_SEND) ? 0 : 1;
++		gpiod_set_value(p->port.rs485_de_gpio, value);
++	} else {
++		if (p->port.rs485.flags & SER_RS485_RTS_AFTER_SEND)
++			mcr |= UART_MCR_RTS;
++		else
++			mcr &= ~UART_MCR_RTS;
++		serial8250_out_MCR(p, mcr);
++	}
+ 
+ 	/*
+ 	 * Empty the RX FIFO, we are not interested in anything
+@@ -1616,10 +1627,25 @@ static inline void __start_tx(struct uart_port *port)
+ void serial8250_em485_start_tx(struct uart_8250_port *up)
+ {
+ 	unsigned char mcr = serial8250_in_MCR(up);
++	unsigned int mctrl;
++	int value;
+ 
+ 	if (!(up->port.rs485.flags & SER_RS485_RX_DURING_TX))
+ 		serial8250_stop_rx(&up->port);
+ 
++	if (mctrl_gpio_to_gpiod(up->gpios, UART_GPIO_RTS)) {
++		mctrl = (up->port.rs485.flags & SER_RS485_RTS_ON_SEND) ?
++			 TIOCM_RTS : 0;
++		mctrl_gpio_set(up->gpios, mctrl);
++		return;
++	}
++
++	if (up->port.rs485_de_gpio) {
++		value = (up->port.rs485.flags & SER_RS485_RTS_ON_SEND) ? 0 : 1;
++		gpiod_set_value(up->port.rs485_de_gpio, value);
++		return;
++	}
++
+ 	if (up->port.rs485.flags & SER_RS485_RTS_ON_SEND)
+ 		mcr |= UART_MCR_RTS;
+ 	else
+@@ -1831,6 +1857,7 @@ void serial8250_tx_chars(struct uart_8250_port *up)
+ 	struct uart_port *port = &up->port;
+ 	struct circ_buf *xmit = &port->state->xmit;
+ 	int count;
++	int tx_count = 0;
+ 
+ 	if (port->x_char) {
+ 		uart_xchar_out(port, UART_TX);
+@@ -1862,6 +1889,7 @@ void serial8250_tx_chars(struct uart_8250_port *up)
+ 		}
+ 		xmit->tail = (xmit->tail + 1) & (UART_XMIT_SIZE - 1);
+ 		port->icount.tx++;
++		tx_count++;
+ 		if (uart_circ_empty(xmit))
+ 			break;
+ 		if ((up->capabilities & UART_CAP_HFIFO) &&
+@@ -1881,7 +1909,14 @@ void serial8250_tx_chars(struct uart_8250_port *up)
+ 	 * HW can go idle. So we get here once again with empty FIFO and disable
+ 	 * the interrupt and RPM in __stop_tx()
+ 	 */
+-	if (uart_circ_empty(xmit) && !(up->capabilities & UART_CAP_RPM))
++	if (uart_circ_empty(xmit) && up->em485 &&
++	    (mctrl_gpio_to_gpiod(up->gpios, UART_GPIO_RTS) ||
++	     up->port.rs485_de_gpio)) {
++		__stop_tx_rs485(up, (u64)tx_count * up->port.frame_time +
++				      DIV_ROUND_UP(up->port.frame_time, 7));
++		if (serial8250_clear_THRI(up))
++			serial8250_rpm_put_tx(up);
++	} else if (uart_circ_empty(xmit) && !(up->capabilities & UART_CAP_RPM))
+ 		__stop_tx(up);
+ }
+ EXPORT_SYMBOL_GPL(serial8250_tx_chars);
+diff --git a/drivers/tty/serial/serial_core.c b/drivers/tty/serial/serial_core.c
+index 2cc5c68c8689..e7b35791ba83 100644
+--- a/drivers/tty/serial/serial_core.c
++++ b/drivers/tty/serial/serial_core.c
+@@ -3464,6 +3464,14 @@ int uart_get_rs485_mode(struct uart_port *port)
+ 	if (port->rs485_term_gpio)
+ 		port->rs485_supported.flags |= SER_RS485_TERMINATE_BUS;
+ 
++	port->rs485_de_gpio = devm_gpiod_get_optional(dev, "rs485-de",
++						GPIOD_OUT_LOW);
++	if (IS_ERR(port->rs485_de_gpio)) {
++		ret = PTR_ERR(port->rs485_de_gpio);
++		port->rs485_de_gpio = NULL;
++		return dev_err_probe(dev, ret, "Cannot get rs485-de-gpios\n");
++	}
++
+ 	return 0;
+ }
+ EXPORT_SYMBOL_GPL(uart_get_rs485_mode);
+diff --git a/include/linux/serial_core.h b/include/linux/serial_core.h
+index d657f2a42a7b..68498fd625eb 100644
+--- a/include/linux/serial_core.h
++++ b/include/linux/serial_core.h
+@@ -579,6 +579,7 @@ struct uart_port {
+ 	struct serial_rs485     rs485;
+ 	struct serial_rs485	rs485_supported;	/* Supported mask for serial_rs485 */
+ 	struct gpio_desc	*rs485_term_gpio;	/* enable RS485 bus termination */
++	struct gpio_desc	*rs485_de_gpio;		/* enable external RS485 driver */
+ 	struct serial_iso7816   iso7816;
+ 	void			*private_data;		/* generic platform data pointer */
+ };

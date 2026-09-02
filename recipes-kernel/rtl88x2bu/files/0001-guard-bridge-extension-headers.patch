@@ -1,0 +1,33 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Advantech <support@advantech.com>
+Date: Wed, 26 Aug 2026 00:00:00 +0000
+Subject: [PATCH] guard bridge extension headers
+
+Linux 6.1 no longer provides net/ipx.h. The bridge extension code is
+disabled for this BSP build, so only include the related legacy protocol
+headers when CONFIG_BR_EXT is enabled.
+
+---
+ core/rtw_br_ext.c | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/core/rtw_br_ext.c b/core/rtw_br_ext.c
+index 0000000..1111111 100644
+--- a/core/rtw_br_ext.c
++++ b/core/rtw_br_ext.c
+@@ -17,11 +17,15 @@
+ #ifdef __KERNEL__
+ 	#include <linux/if_arp.h>
+ 	#include <net/ip.h>
++#ifdef CONFIG_BR_EXT
+ 	#include <net/ipx.h>
+ 	#include <linux/atalk.h>
++#endif
+ 	#include <linux/udp.h>
++#ifdef CONFIG_BR_EXT
+ 	#include <linux/if_pppox.h>
+ #endif
++#endif
+ 
+ #if 1	/* rtw_wifi_driver */
+ 	#include <drv_types.h>
